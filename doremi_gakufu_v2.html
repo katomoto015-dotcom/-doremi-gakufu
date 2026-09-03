@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>ドレミ楽譜ルビ v2</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;color:#202124;background:#f5f6fa}
+*{box-sizing:border-box}body{margin:0}main{max-width:900px;margin:auto;padding:16px}.card{background:#fff;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 3px 16px #00000012}h1{font-size:23px;margin:4px 0 12px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button,.pick,select{font:inherit;border:0;border-radius:12px;padding:11px 14px}.pick,button{background:#222;color:#fff}.pick{display:inline-block;cursor:pointer}input[type=file]{display:none}button:disabled{opacity:.45}select{background:#eee;color:#111}canvas{display:block;width:100%;height:auto;margin-top:14px;border-radius:12px;background:#eee}.status{color:#666;font-size:14px;line-height:1.5}.hint{font-size:13px;color:#666;line-height:1.6}.pill{padding:7px 10px;background:#f0f1f5;border-radius:999px;font-size:13px}
+</style>
+</head>
+<body><main>
+<h1>🎼 ドレミ楽譜ルビ v2（試作）</h1>
+<div class="card">
+<div class="row">
+<label class="pick">📷 楽譜の写真を選ぶ<input id="file" type="file" accept="image/*"></label>
+<button id="analyze" disabled>🔎 解析する</button>
+</div>
+<div class="row" style="margin-top:10px">
+<span class="pill">音部記号</span>
+<select id="clef"><option value="auto">自動（上下で判定）</option><option value="treble">ト音記号</option><option value="bass">ヘ音記号</option></select>
+<span class="pill">調号</span>
+<select id="key"><option value="0">なし</option><option value="1">♭1つ</option><option value="2" selected>♭2つ</option><option value="3">♭3つ</option><option value="4">♭4つ</option><option value="5">♭5つ</option><option value="1s">♯1つ</option><option value="2s">♯2つ</option></select>
+</div>
+<canvas id="cv"></canvas>
+<p id="status" class="status">写真を選んでください。</p>
+</div>
+<div class="card hint"><b>v2で改善したところ</b><br>五線を複数組探し、五線線を除去してから音符候補を探します。指番号などの小さい文字をできるだけ除外し、ト音記号・ヘ音記号の両方を扱います。まだ和音・連桁・スラー・複雑な印刷楽譜は誤認識することがあります。</div>
+</main>
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script>
+const file=document.getElementById('file'), btn=document.getElementById('analyze'), cv=document.getElementById('cv'), ctx=cv.getContext('2d'), status=document.getElementById('status');
+let image=new Image(), loaded=false;
+file.onchange=()=>{const f=file.files[0];if(!f)return;image.onload=()=>{const s=Math.min(1,1800/image.naturalWidth);cv.width=Math.round(image.naturalWidth*s);cv.height=Math.round(image.naturalHeight*s);ctx.drawImage(image,0,0,cv.width,cv.height);loaded=true;btn.disabled=false;status.textContent='写真を読み込みました。設定を確認して「解析する」を押してください。'};image.src=URL.createObjectURL(f)};
+function waitCV(){return typeof cv2!=='undefined'&&cv2.Mat}
+function median(a){a=a.slice().sort((x,y)=>x-y);return a.length?a[Math.floor(a.length/2)]:0}
+function groupLines(lines){lines.sort((a,b)=>a-b);const out=[];for(const y of lines){if(!out.length||y-out[out.length-1]>4)out.push(y);else out[out.length-1]=(out[out.length-1]+y)/2}return out}
+function findStaves(src){
+ const gray=new cv2.Mat();cv2.cvtColor(src,gray,cv2.COLOR_RGBA2GRAY);const bw=new cv2.Mat();cv2.threshold(gray,bw,190,255,cv2.THRESH_BINARY_INV);
+ const horiz=new cv2.Mat();const kernel=cv2.getStructuringElement(cv2.MORPH_RECT,new cv2.Size(Math.max(25,Math.round(src.cols/35)),1));cv2.morphologyEx(bw,horiz,cv2.MORPH_OPEN,kernel);
+ const proj=new Array(src.rows).fill(0);for(let y=0;y<src.rows;y++){let row=horiz.row(y);proj[y]=cv2.countNonZero(row);row.delete()}
+ const raw=[];const threshold=src.cols*0.18;for(let y=1;y<src.rows-1;y++)if(proj[y]>threshold&&proj[y]>=proj[y-1]&&proj[y]>=proj[y+1])raw.push(y);
+ const lines=groupLines(raw), staves=[];
+ for(let i=0;i<lines.length-4;i++){const g=[lines[i+1]-lines[i],lines[i+2]-lines[i+1],lines[i+3]-lines[i+2],lines[i+4]-lines[i+3]], av=median(g);if(av>3&&av<src.rows/20&&Math.max(...g)-Math.min(...g)<Math.max(7,av*.65)){staves.push({lines:lines.slice(i,i+5),space:av});i+=4}}
+ gray.delete();bw.delete();horiz.delete();kernel.delete();return staves;
+}
+function removeStaffLines(src,staves){
+ const gray=new cv2.Mat();cv2.cvtColor(src,gray,cv2.COLOR_RGBA2GRAY);const bw=new cv2.Mat();cv2.threshold(gray,bw,155,255,cv2.THRESH_BINARY_INV);
+ const clean=bw.clone();for(const st of staves){for(const y0 of st.lines){const y=Math.round(y0);for(let dy=-1;dy<=1;dy++)if(y+dy>=0&&y+dy<clean.rows)cv2.line(clean,new cv2.Point(0,y+dy),new cv2.Point(clean.cols,y+dy),new cv2.Scalar(0),1)}}
+ const k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,new cv2.Size(3,3));cv2.morphologyEx(clean,clean,cv2.MORPH_CLOSE,k);gray.delete();bw.delete();k.delete();return clean;
+}
+function pitchFor(y,st,clef){
+ const step=st.space/2;let idx=Math.round((st.lines[4]-y)/step); // diatonic steps from bottom line
+ if(clef==='bass'){const names=['ソ','ラ','シ','ド','レ','ミ','ファ','ソ','ラ','シ','ド','レ','ミ'];return names[(idx%7+7)%7]}
+ const names=['ミ','ファ','ソ','ラ','シ','ド','レ','ミ','ファ','ソ','ラ','シ','ド'];return names[(idx%7+7)%7];
+}
+function accidental(name,key){const k=document.getElementById('key').value;if(k==='1'&&name==='シ')return 'シ♭';if(k==='2'&&(name==='シ'||name==='ミ'))return name+'♭';if(k==='3'&&(name==='シ'||name==='ミ'||name==='ラ'))return name+'♭';if(k==='4'&&(name==='シ'||name==='ミ'||name==='ラ'||name==='レ'))return name+'♭';if(k==='1s'&&name==='ファ')return 'ファ♯';if(k==='2s'&&(name==='ファ'||name==='ド'))return name+'♯';return name}
+function analyze(){
+ if(!loaded)return;if(!waitCV()){status.textContent='画像解析エンジンを読み込み中です。数秒待ってもう一度押してください。';return}
+ btn.disabled=true;status.textContent='解析中…';setTimeout(()=>{
+  const src=cv2.imread(cv), staves=findStaves(src);if(!staves.length){status.textContent='五線を見つけられませんでした。真上から撮った写真で試してください。';src.delete();btn.disabled=false;return}
+  const clean=removeStaffLines(src,staves);const contours=new cv2.MatVector(),hier=new cv2.Mat();cv2.findContours(clean,contours,hier,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE);
+  const candidates=[];for(let i=0;i<contours.size();i++){const r=cv2.boundingRect(contours.get(i));const area=r.width*r.height;for(let si=0;si<staves.length;si++){const st=staves[si],top=st.lines[0]-st.space*1.8,bottom=st.lines[4]+st.space*1.8;if(r.y+r.height<top||r.y>bottom)continue;const ratio=r.width/r.height;if(area>8&&area<st.space*st.space*8&&r.width>=st.space*.45&&r.width<=st.space*2.5&&r.height>=st.space*.35&&r.height<=st.space*1.7&&ratio>.45&&ratio<3.0)candidates.push({x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height,si})}}
+  const picked=[];candidates.sort((a,b)=>a.x-b.x||a.y-b.y);for(const p of candidates){if(!picked.some(q=>q.si===p.si&&Math.abs(q.x-p.x)<Math.max(8,p.w*.8)&&Math.abs(q.y-p.y)<Math.max(7,p.h*.7)))picked.push(p)}
+  cv2.imshow(cv,src);ctx.font=Math.max(13,Math.round(Math.min(cv.width,cv.height)/65))+'px sans-serif';ctx.textAlign='center';ctx.textBaseline='bottom';
+  for(const p of picked){const st=staves[p.si];let clef=document.getElementById('clef').value;if(clef==='auto')clef=(p.si%2===0?'treble':'bass');let n=accidental(pitchFor(p.y,st,clef));ctx.fillText(n,p.x,Math.max(16,p.y-st.space*.45))}
+  status.textContent=`${staves.length}組の五線を検出、音符候補 ${picked.length} 個にドレミを表示しました。ズレる音は今後さらに精度を上げます。`;[src,clean,contours,hier].forEach(z=>z.delete());btn.disabled=false;
+ },60);
+}
+btn.onclick=analyze;
+</script></body></html>
